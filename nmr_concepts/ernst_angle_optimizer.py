@@ -6,9 +6,10 @@ and annotate the maximum (Ernst angle).
 
 Model:
   E = exp(-TR/T1)
-  S(alpha) ∝ [ sin(alpha) * (1 - E) ] / [ 1 - E * cos(alpha) ]
+  E2 = exp(-TE/T2) if T2 and TE are provided, otherwise E2 = 1
+  S(alpha) ∝ [ sin(alpha) * (1 - E) ] / [ 1 - E * cos(alpha) ] * E2
 
-This is the classic Ernst steady-state formula. The maximizing flip angle is:
+This is the classic Ernst steady-state formula with optional T2 decay. The maximizing flip angle is:
   alpha_E = arccos(E)
 
 Sources: 
@@ -26,21 +27,31 @@ import matplotlib.pyplot as plt
 TR = None  # Repetition time (seconds) - single value. If None, use TR_list.
 TR_list = [0.1, 0.3, 0.5, 0.8, 1.0]  # List of TRs for multiple curves. If None, use TR.
 T1 = 0.35  # Spin-lattice relaxation time (seconds)
+T2 = 0.2  # Spin-spin relaxation time (seconds). If None, E2 = 1.
+TE = 0.096  # Total Echo time (seconds). If None, E2 = 1.
+
 signal_averaging = False  # If True, plot sensitivity-per-unit-time instead of signal-per-scan
 
-def ernst_signal(alpha_rad: np.ndarray, TR: float, T1: float) -> np.ndarray:
+def ernst_signal(alpha_rad: np.ndarray, TR: float, T1: float, T2: float = None, TE: float = None) -> np.ndarray:
     """Return signal-per-scan (arbitrary units) for flip angles (radians)."""
     if TR <= 0 or T1 <= 0:
         raise ValueError("TR and T1 must be positive.")
     E = math.exp(-TR / T1)
+    
+    # Handle T2 decay: if T2 and TE are provided, calculate E2, otherwise E2 = 1
+    if T2 is not None and TE is not None and T2 > 0 and TE >= 0:
+        E2 = math.exp(-TE / T2)
+    else:
+        E2 = 1.0
+    
     # Avoid division by zero at alpha=0 when using vectorized operations
     cos_a = np.cos(alpha_rad)
     sin_a = np.sin(alpha_rad)
     if signal_averaging:
         average_factor = np.sqrt(1/TR)
-        return average_factor * (sin_a * (1.0 - E)) / (1.0 - E * cos_a)
+        return average_factor * (sin_a * (1.0 - E)) / (1.0 - E * cos_a) * E2
     else:
-        return (sin_a * (1.0 - E)) / (1.0 - E * cos_a)
+        return (sin_a * (1.0 - E)) / (1.0 - E * cos_a) * E2
 
 def ernst_angle(TR: float, T1: float) -> float:
     """Return Ernst flip angle in radians."""
@@ -54,6 +65,8 @@ def main():
     p.add_argument("--TR", type=float, help=f"Repetition time (seconds, default: {TR})")
     p.add_argument("--TR-list", nargs='+', type=float, help=f"List of TRs for multiple curves (default: {TR_list})")
     p.add_argument("--T1", type=float, help=f"Spin-lattice relaxation time (seconds, default: {T1})")
+    p.add_argument("--T2", type=float, help=f"Spin-spin relaxation time (seconds, default: {T2})")
+    p.add_argument("--TE", type=float, help=f"Total Echo time (seconds, default: {TE})")
     p.add_argument("--degmax", type=float, default=90.0, help="Max flip angle to plot (degrees, default 90)")
     p.add_argument("--outfile", type=str, default=None, help="Optional output PNG filename")
     p.add_argument("--self-test", action="store_true", help="Run a quick sanity check and exit")
@@ -73,6 +86,8 @@ def main():
 
     # Use command line arguments if provided, otherwise use global variables
     current_T1 = args.T1 if args.T1 is not None else T1
+    current_T2 = args.T2 if args.T2 is not None else T2
+    current_TE = args.TE if args.TE is not None else TE
     
     # Determine which TR values to use
     if args.TR_list is not None:
@@ -93,6 +108,12 @@ def main():
     
     if any(tr <= 0 for tr in current_TR_list):
         raise SystemExit("Error: All TR values must be positive.")
+    
+    # Validate T2 and TE if provided
+    if current_T2 is not None and current_T2 <= 0:
+        raise SystemExit("Error: T2 must be positive if provided.")
+    if current_TE is not None and current_TE < 0:
+        raise SystemExit("Error: TE must be non-negative if provided.")
 
     # Angle grid (avoid singular endpoints)
     degmax = max(10.0, min(90.0, args.degmax))
@@ -106,7 +127,7 @@ def main():
     colors = plt.cm.viridis(np.linspace(0, 1, len(current_TR_list)))
     
     for i, current_TR in enumerate(current_TR_list):
-        S = ernst_signal(alpha_rad, current_TR, current_T1)
+        S = ernst_signal(alpha_rad, current_TR, current_T1, current_T2, current_TE)
         
         # Find maximum and Ernst angle for this TR
         idx_max = int(np.argmax(S))
@@ -115,7 +136,6 @@ def main():
 
         a_ernst_rad = ernst_angle(current_TR, current_T1)
         a_ernst_deg = math.degrees(a_ernst_rad)
-        S_at_ernst = float(ernst_signal(np.array([a_ernst_rad]), current_TR, current_T1)[0])
 
         # Plot the curve
         label = f"TR = {current_TR:.3g} s"
@@ -142,10 +162,20 @@ def main():
     else:
         ax.set_ylabel("Signal per scan (arb. units)")
     
+    # Build title with all relevant parameters
+    title_parts = []
     if single_TR_mode:
-        title = f"Ernst steady-state signal vs flip angle (TR={current_TR_list[0]:.3g} s, T1={current_T1:.3g} s)"
+        title_parts.append(f"TR={current_TR_list[0]:.3g}s")
     else:
-        title = f"Ernst steady-state signal vs flip angle (T1={current_T1:.3g} s, multiple TRs)"
+        title_parts.append("multiple TRs")
+    
+    title_parts.append(f"T1={current_T1:.3g}s")
+    
+    if current_T2 is not None and current_TE is not None:
+        title_parts.append(f"T2={current_T2:.3g}s")
+        title_parts.append(f"TE={current_TE:.3g}s")
+    
+    title = f"Ernst steady-state signal vs flip angle ({', '.join(title_parts)})"
     
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
